@@ -121,7 +121,7 @@ class OptimBase:
             block = loss >= self._loss_history[-1] + std_loss * self.temp(self.k)
         self._block_history.append(block)
         if not block:
-            if len(self.thetas) > 2:
+            if len(self.thetas) > 2 and self._params["momentum"] > 0:
                 prev_diff = self.theta - self.thetas[-2]
                 alignment = np.dot(
                     prev_diff / np.linalg.norm(prev_diff),
