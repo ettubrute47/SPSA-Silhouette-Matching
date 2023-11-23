@@ -28,7 +28,7 @@ true_sil = raytrace_silhouette(scene, perc=1)
 # for initial perturbation, do spsa...
 
 rotation = true_rotation + np.array([0.6, 0.1, 0.2])
-translation = true_translation + np.array([-0.5, -0.5, -4])
+translation = true_translation  # + np.array([-0.5, -0.5, -4])
 
 scene = get_transformed_scene(
     mesh, trimesh.transformations.euler_matrix(*rotation), translation
@@ -39,7 +39,7 @@ sil = raytrace_silhouette(scene, perc=1)
 def get_scene_from_theta(theta: np.ndarray):
     # theta is rotation matrix, and translation matrix
     rotation = theta[:3]
-    translation = theta[3:]
+    translation = true_translation  # theta[3:]
     rotation_matrix = trimesh.transformations.euler_matrix(*rotation)
     return get_transformed_scene(mesh, rotation_matrix, translation)
 
@@ -63,6 +63,7 @@ def v_generator(perc=0.5):
 
 
 theta_0 = np.append(rotation, translation)
+theta_0 = np.array(rotation)
 
 scene = get_scene_from_theta(theta_0)
 sil = raytrace_silhouette(scene, perc=0.5)
@@ -70,16 +71,17 @@ plt.imshow(sil + true_sil)
 plt.show()
 
 goal_theta = np.append(true_rotation, true_translation)
+goal_theta = np.array(true_rotation)
 
 consts = dict(
     max_delta_theta=0.05,
-    max_iter=50,
+    max_iter=100,
     # alpha=1.0,
     num_approx=1,
     # momentum=0.5,
-    c0=10000,
+    c0=1e-1,
 )
-optim = OptimFDSA(theta_0, partial(get_loss_from_theta, perc=1), **consts)
+optim = OptimFDSA(theta_0, partial(get_loss_from_theta, perc=0.5), **consts)
 losses, dists = optim.experiment(1, goal_theta=goal_theta)
 optim._grad_history
 diffs = np.abs(optim.thetas - goal_theta)
