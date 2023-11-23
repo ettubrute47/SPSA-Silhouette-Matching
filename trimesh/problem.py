@@ -14,18 +14,26 @@ mesh.apply_translation(-mesh.centroid)
 scale_factor = 1.0 / mesh.extents.max()
 mesh.apply_scale(scale_factor)
 
+RESOLUTION = [320, 320]
+RESOLUTION = [128, 128]
 
-def get_transformed_scene(mesh, rotation_transform, translation_vector) -> Scene:
+
+def get_transformed_scene(
+    mesh, rotation_transform=None, translation_vector=None
+) -> Scene:
     transformed = mesh.copy()
-    transformed.apply_transform(rotation_transform)
+    if rotation_transform is not None:
+        transformed.apply_transform(rotation_transform)
     # transformed.apply_translation(translation_vector)
     # tt = transformed.apply_obb()  # i guess it works..
     scene = Scene()
     scene.add_geometry(
         transformed, geom_name="mesh"
     )  # , transform=transformation_matrix)
-    scene.apply_translation(translation_vector)
-    scene.camera.resolution = [640, 480]
+    if translation_vector is not None:
+        scene.apply_translation(translation_vector)
+    # scene.camera.resolution = [640, 480]
+    scene.camera.resolution = RESOLUTION
     # set field of view, in degrees
     # make it relative to resolution so pixels per degree is same
     scene.camera.fov = [
@@ -89,3 +97,9 @@ def stochastic_jacaard_index(m1: np.ndarray, m2: np.ndarray):
     if count_pos == 0:
         return 0
     return count_agree_pos / count_pos
+
+
+if __name__ == "__main__":
+    sil = raytrace_silhouette(get_transformed_scene(mesh), perc=1)
+    plt.imshow(sil)
+    plt.show()

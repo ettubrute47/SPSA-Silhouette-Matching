@@ -72,13 +72,25 @@ plt.show()
 goal_theta = np.append(true_rotation, true_translation)
 
 consts = dict(
-    max_delta_theta=0.1, max_iter=30, alpha=1.0, num_approx=1, momentum=0.9, c0=1000
+    max_delta_theta=0.05,
+    max_iter=50,
+    # alpha=1.0,
+    num_approx=1,
+    # momentum=0.5,
+    c0=10000,
 )
 optim = OptimFDSA(theta_0, partial(get_loss_from_theta, perc=1), **consts)
-losses, dists = optim.experiment(3, goal_theta=goal_theta)
+losses, dists = optim.experiment(1, goal_theta=goal_theta)
+optim._grad_history
+diffs = np.abs(optim.thetas - goal_theta)
 
-fig, axs = plt.subplots(1, 2)
+grad_smooth = np.apply_along_axis(np.convolve, 0, optim._grad_history, np.ones(2) / 2)
+print(grad_smooth.shape)
+
+fig, axs = plt.subplots(1, 3)
 axs[0].plot(losses)
-axs[1].plot(dists)
+# axs[1].plot(dists)
+axs[1].plot(optim.thetas - goal_theta)
+axs[2].plot(grad_smooth)
 
 plt.show()
