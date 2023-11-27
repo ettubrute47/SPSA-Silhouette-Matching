@@ -9,7 +9,7 @@ import seaborn as sns
 import pandas as pd
 
 sns.set_style("darkgrid")
-from spsa import OptimSPSA, OptimFDSA, balanced_bernouli, segmented_uniform_sample
+from spsa import OptimSPSA, Box, OptimFDSA, balanced_bernouli, segmented_uniform_sample
 
 # %%
 """
@@ -66,12 +66,23 @@ def noisy_loss(theta, noise_scale=1e-3, v=None):
 
 
 theta_0 = np.array([0.5, 1.5])
-theta_0 = np.array(goal_theta)
+# theta_0 = np.array(goal_theta)
+
+box = Box(np.ones(2) * -3, np.ones(2) * 3)
 
 # %%
-optim = OptimSPSA(theta_0, noisy_loss, max_iter=200, max_delta_theta=0.02)
+optim = OptimSPSA(
+    theta_0,
+    box,
+    partial(noisy_loss, noise_scale=1e-1),
+    max_iter=200,
+    max_delta_theta=0.01,
+    theta_smooth=5,
+)
 optim.run()
-plt.plot(optim._loss_history)
+diffs = optim.rms_dist_from_truth(goal_theta)
+diffs /= diffs[0]
+plt.plot(diffs)
 
 
 # %%

@@ -60,16 +60,16 @@ class Box:
         self.hi = hi
         self.rng = hi - low
 
-    def normalize(self, theta: np.ndarray):
-        return (self.clip(theta) - self.low) / self.rng
+    def normalize(self, theta: np.ndarray, i=...):
+        return (self.clip(theta, i=i) - self.low[i]) / self.rng[i]
 
-    def unnormalize(self, theta_norm: np.ndarray):
-        return self.rng * self.clip(theta_norm, True) + self.low
+    def unnormalize(self, theta_norm: np.ndarray, i=...):
+        return self.rng[i] * self.clip(theta_norm, True, i=i) + self.low[i]
 
-    def clip(self, theta: np.ndarray, normalized=False):
+    def clip(self, theta: np.ndarray, normalized=False, i=...):
         if normalized:
             return np.clip(theta, 0, 1)
-        return np.clip(theta, self.low, self.hi)
+        return np.clip(theta, self.low[i], self.hi[i])
 
 
 # a = a0 * (1 + A) ** alpha
@@ -81,6 +81,7 @@ class OptimBase:
     def __init__(
         self,
         theta_0,
+        box: Box,
         loss_fnc,
         v_fnc=None,
         verbose=False,
@@ -93,6 +94,7 @@ class OptimBase:
         self.loss = loss_fnc
         self._on_theta_update = on_theta_update
         self.v_fnc = v_fnc
+        self.box = box
         self._v = None
         self._implicit_theta_mask = np.ones(len(theta_0), bool)
         if implicit_theta_mask is not None:
@@ -102,7 +104,8 @@ class OptimBase:
         self._used_thetas = []
         self._block_history = []
         self._grad_history = []
-        self.thetas = [np.asarray(theta_0)]
+        self._theta_0 = np.asarray(theta_0)
+        self.thetas = [self.box.normalize(self._theta_0)]
         self.k = self._params.get("k0", 0)
         assert (
             len(self._required_params - set(self._params)) == 0
@@ -110,20 +113,21 @@ class OptimBase:
 
     @property
     def theta_0(self):
-        return self.thetas[0]
+        return self.box.normalize(self._theta_0)
 
     def set_params(self, **params):
         self._params.maps[0].update(params)
 
     def reset(self, theta_0=None):
-        if theta_0 is None:
-            theta_0 = self.theta_0
+        if theta_0 is not None:
+            self._theta_0 = np.array(theta_0)
         self._all_loss_history = []
         self._loss_history = []
         self._used_thetas = []
         self._block_history = []
         self._grad_history = []
-        self.thetas = [np.array(theta_0)]
+        self.thetas = [self.theta_0]
+        # self.thetas = [np.array(theta_0)]
         self.k = self["k0"]
 
     def _approximate_a(self, max_delta_theta, num_approx=10):
@@ -155,7 +159,8 @@ class OptimBase:
         self._set_param_default("a0", self._approximate_a(self["max_delta_theta"]))
 
     def _get_loss(self, theta):
-        loss = self.loss(theta, v=self._v)
+        raw_theta = self.box.unnormalize(theta)
+        loss = self.loss(raw_theta, v=self._v)
         self._all_loss_history.append(loss)
         self._used_thetas.append(theta)
         return loss
@@ -181,7 +186,7 @@ class OptimBase:
             momentum = prev_diff * alignment * self._params["momentum"]
             self.thetas.append(self.theta - theta_diff + momentum)
         else:
-            self.thetas.append(self.theta - theta_diff)
+            self.thetas.append(self.box.clip(self.theta - theta_diff, True))
         if self._on_theta_update is not None:
             self._on_theta_update(self)
 
@@ -248,6 +253,7 @@ class OptimBase:
         pi = int(num_steps // 10)
         for i in range(num_steps):
             theta = self.step()
+            print(theta)
             if self.verbose and i % pi == 0:
                 self._print_progress()
             yield theta
@@ -263,8 +269,9 @@ class OptimBase:
             pass
         return theta
 
-    def rms_dist_from_truth(self, goal_theta):
-        diffs = self.thetas - goal_theta
+    def rms_dist_from_truth(self, goal_theta, normalized=False):
+        assert not normalized
+        diffs = self.thetas - self.box.normalize(goal_theta)
         rms_dist = np.sqrt(np.mean(diffs * diffs, axis=1))
         return rms_dist
 
@@ -362,13 +369,14 @@ class OptimSPSA(OptimSA):
     def __init__(
         self,
         theta_0,
+        box: Box,
         loss_fnc,
         v_fnc=None,
         perturb_gen=None,
         verbose=False,
         **params,
     ):
-        super().__init__(theta_0, loss_fnc, v_fnc, verbose=verbose, **params)
+        super().__init__(theta_0, box, loss_fnc, v_fnc, verbose=verbose, **params)
         if perturb_gen is None:
             self._perturb_gen = bernouli_sample(len(self.theta_0))
         else:
@@ -427,12 +435,13 @@ if __name__ == "__main__":
     theta_0 = np.array([0.4, 1.7])
 
     def on_theta_update(optim: OptimSA):
-        optim.thetas[-1][-1] = optim.perc_k * goal_theta[-1] + theta_0[-1] * (
-            1 - optim.perc_k
+        optim.thetas[-1][-1] = optim.box.normalize(
+            optim.perc_k * goal_theta[-1] + theta_0[-1] * (1 - optim.perc_k), i=-1
         )
 
     optim = OptimSPSA(
         theta_0,
+        Box(np.zeros(2), np.ones(2) * 10),
         partial(noisy_loss, noise_scale=1e-1),
         verbose=True,
         max_delta_theta=0.1,
@@ -440,13 +449,13 @@ if __name__ == "__main__":
         # alpha=1,
         max_iter=100,
         theta_smooth=10,
-        c_std_scale=0.1,
+        c_std_scale=1,
         on_theta_update=on_theta_update,
         # momentum=0.95,
     )
     optim.run()
 
-    thetas = optim.thetas
+    thetas = optim.box.unnormalize(optim.thetas)
     num_segments = len(thetas)
     for i in range(len(thetas) - 1):
         x1, y1 = thetas[i]
