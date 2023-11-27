@@ -49,33 +49,82 @@ class SPSA_Params(TypedDict):
     t0: float
     num_approx: int
     momentum: float
+    c_guess: float
+    c_std_scale: float
+    k0: int
+
+
+class Box:
+    def __init__(self, low: np.ndarray, hi: np.ndarray, size=None):
+        self.low = low
+        self.hi = hi
+        self.rng = hi - low
+
+    def normalize(self, theta: np.ndarray):
+        return (self.clip(theta) - self.low) / self.rng
+
+    def unnormalize(self, theta_norm: np.ndarray):
+        return self.rng * self.clip(theta_norm, True) + self.low
+
+    def clip(self, theta: np.ndarray, normalized=False):
+        if normalized:
+            return np.clip(theta, 0, 1)
+        return np.clip(theta, self.low, self.hi)
 
 
 # a = a0 * (1 + A) ** alpha
 # return a / (k + 1 + A) ** alpha
 class OptimBase:
-    def __init__(self, theta_0, loss_fnc, v_fnc=None, verbose=False, **params):
-        self.verbose = verbose
-        self.theta_0 = np.asarray(theta_0)
-        self._params = params
-        self.loss = loss_fnc
-        self.v_fnc = v_fnc
-        self._all_loss_history = []
-        self._loss_history = []
-        self._used_thetas = []
-        self._block_history = []
-        self._grad_history = []
-        self.thetas = [self.theta_0]
-        self.k = 0
+    _default_params = dict()
+    _required_params = set()
 
-    def reset(self):
+    def __init__(
+        self,
+        theta_0,
+        loss_fnc,
+        v_fnc=None,
+        verbose=False,
+        on_theta_update=None,
+        implicit_theta_mask=None,
+        **params,
+    ):
+        self.verbose = verbose
+        self._params = ChainMap(params, self._default_params)
+        self.loss = loss_fnc
+        self._on_theta_update = on_theta_update
+        self.v_fnc = v_fnc
+        self._v = None
+        self._implicit_theta_mask = np.ones(len(theta_0), bool)
+        if implicit_theta_mask is not None:
+            self._implicit_theta_mask = np.array(implicit_theta_mask, bool)
         self._all_loss_history = []
         self._loss_history = []
         self._used_thetas = []
         self._block_history = []
         self._grad_history = []
-        self.thetas = [self.theta_0]
-        self.k = 0
+        self.thetas = [np.asarray(theta_0)]
+        self.k = self._params.get("k0", 0)
+        assert (
+            len(self._required_params - set(self._params)) == 0
+        ), self._required_params
+
+    @property
+    def theta_0(self):
+        return self.thetas[0]
+
+    def set_params(self, **params):
+        self._params.maps[0].update(params)
+
+    def reset(self, theta_0=None):
+        if theta_0 is None:
+            theta_0 = self.theta_0
+        self._all_loss_history = []
+        self._loss_history = []
+        self._used_thetas = []
+        self._block_history = []
+        self._grad_history = []
+        self.thetas = [np.array(theta_0)]
+        self.k = self["k0"]
 
     def _approximate_a(self, max_delta_theta, num_approx=10):
         approx_grad = np.mean([self.approx_grad() for i in range(num_approx)], axis=0)
@@ -88,13 +137,25 @@ class OptimBase:
         )
         return a0
 
-    def calibrate(self):
-        self._params["A"] = self._params["max_iter"] * 0.13
-        # approximate grad, and take magnitude...
-        self._params["a0"] = self._approximate_a(self._params["max_delta_theta"])
+    def __getitem__(self, key: str):
+        return self._params.get(key)
 
-    def _get_loss(self, theta, v=None):
-        loss = self.loss(theta, v=v)
+    def _set_param_default(self, key: str, val):
+        self._params.maps[-1][key] = val
+
+    def __contains__(self, key: str):
+        return key in self._params
+
+    def _is_param_explictly_set(self, key):
+        return key in self._params.maps[0]
+
+    def calibrate(self):
+        self._set_param_default("A", self["max_iter"] * 0.13)
+        # approximate grad, and take magnitude...
+        self._set_param_default("a0", self._approximate_a(self["max_delta_theta"]))
+
+    def _get_loss(self, theta):
+        loss = self.loss(theta, v=self._v)
         self._all_loss_history.append(loss)
         self._used_thetas.append(theta)
         return loss
@@ -102,8 +163,31 @@ class OptimBase:
     def approx_grad(self):
         pass
 
+    def check_block(self, theta_diff, loss):
+        if self["blocking"] and self.k > 5:
+            std_loss = np.std(self._loss_history[-10:])
+            block = loss >= self._loss_history[-1] + std_loss * self.temp(self.k)
+            return block
+        return False
+
+    def _update_theta(self, theta_diff):
+        if len(self.thetas) > 2 and self._params["momentum"] > 0:
+            prev_diff = self.theta - self.thetas[-2]
+            alignment = np.dot(
+                prev_diff / np.linalg.norm(prev_diff),
+                -theta_diff / np.linalg.norm(theta_diff),
+            )
+            alignment = np.sqrt(max(0, alignment))
+            momentum = prev_diff * alignment * self._params["momentum"]
+            self.thetas.append(self.theta - theta_diff + momentum)
+        else:
+            self.thetas.append(self.theta - theta_diff)
+        if self._on_theta_update is not None:
+            self._on_theta_update(self)
+
     def step(self):
-        a = self.ak(self.k)
+        a = self.ak
+        self._v = None
 
         for i in range(self._params["num_approx"]):
             self.approx_grad()
@@ -114,30 +198,21 @@ class OptimBase:
             theta_diff *= self._params["max_delta_theta"] / theta_diff_mag
 
         # we let it be a max...
-        loss = self.loss(self.theta - theta_diff)  # don't count it...
-        block = False
-        if self._params["blocking"] and self.k > 5:
-            std_loss = np.std(self._loss_history[-10:])
-            block = loss >= self._loss_history[-1] + std_loss * self.temp(self.k)
+        loss = self._get_loss(self.theta - theta_diff)  # don't count it...
+        block = self.check_block(theta_diff, loss)
         self._block_history.append(block)
         if not block:
-            if len(self.thetas) > 2 and self._params["momentum"] > 0:
-                prev_diff = self.theta - self.thetas[-2]
-                alignment = np.dot(
-                    prev_diff / np.linalg.norm(prev_diff),
-                    -theta_diff / np.linalg.norm(theta_diff),
-                )
-                alignment = np.sqrt(max(0, alignment))
-                momentum = prev_diff * alignment * self._params["momentum"]
-                self.thetas.append(self.theta - theta_diff + momentum)
-            else:
-                self.thetas.append(self.theta - theta_diff)
+            self._update_theta(theta_diff)
             self._loss_history.append(loss)
 
         self.k += 1
         return self.theta
 
-    def ak(self, k):
+    @property
+    def ak(self):
+        return self.a_gain(self.k)
+
+    def a_gain(self, k):
         return self._params["a0"] / (k + 1 + self._params["A"]) ** self._params["alpha"]
 
     def temp(self, k):
@@ -145,14 +220,27 @@ class OptimBase:
 
     @property
     def theta(self):
+        if self["theta_smooth"] > 1 and len(self.thetas) > self["theta_smooth"]:
+            return np.average(
+                self.thetas[-self["theta_smooth"] :][::-1],
+                axis=0,
+                weights=(1 / np.arange(1, self["theta_smooth"] + 1)),
+            )
         return self.thetas[-1]
+
+    @property
+    def perc_k(self):
+        return self.k / self["max_iter"]
 
     def _print_progress(self):
         print(f"{self.k}: {self._loss_history[-1]}")
 
-    def irun(self, reset=True, calibrate=True, num_steps=None):
+    def irun(self, theta_0=None, reset=True, calibrate=True, num_steps=None, **params):
+        if theta_0 is not None:
+            assert reset, "when you set theta_0 you are also resetting the optimizer"
+        self.set_params(**params)
         if reset:
-            self.reset()
+            self.reset(theta_0)
         if calibrate:
             self.calibrate()
         if num_steps is None:
@@ -164,8 +252,14 @@ class OptimBase:
                 self._print_progress()
             yield theta
 
-    def run(self, reset=True, calibrate=True, num_steps=None):
-        for theta in self.irun(reset=reset, calibrate=calibrate, num_steps=num_steps):
+    def run(self, theta_0=None, reset=True, calibrate=True, num_steps=None, **params):
+        for theta in self.irun(
+            theta_0=theta_0,
+            reset=reset,
+            calibrate=calibrate,
+            num_steps=num_steps,
+            **params,
+        ):
             pass
         return theta
 
@@ -174,13 +268,34 @@ class OptimBase:
         rms_dist = np.sqrt(np.mean(diffs * diffs, axis=1))
         return rms_dist
 
+    def custom_experiment(self, num_trials, setup=None, get_metrics=None):
+        """
+        get_metrics must return a list of elements that are different types of metrics
+        for instance, if you want to collect a list of loss histories only, you'd need to return
+        (optim._loss_history, )
+        """
+        results = []
+        for i in range(num_trials):
+            if setup is not None:
+                setup(self, i)
+            self.run()
+            if get_metrics is not None:
+                run_results = get_metrics(self, i)
+            else:
+                run_results = (self._loss_history,)
+            for i, res in enumerate(run_results):
+                if len(results) <= i:
+                    results.append([])
+                results[i].append(np.array(res))
+        for i in range(len(results)):
+            results[i] = np.array(results[i]).T
+        return results
+
     def experiment(self, num_trials, theta_history=False, goal_theta=None):
         losses = []
         dists = []
         thetas = []
         for i in range(num_trials):
-            self.reset()
-            self.calibrate()
             self.run()
             losses.append(self._loss_history.copy())
             if goal_theta is not None:
@@ -195,7 +310,7 @@ class OptimBase:
         return results
 
 
-class OptimSPSA(OptimBase):
+class OptimSA(OptimBase):
     _default_params: SPSA_Params = {
         "gamma": 0.101,
         "alpha": 0.602,
@@ -204,10 +319,46 @@ class OptimSPSA(OptimBase):
         "blocking": False,
         "max_iter": 100,
         "momentum": 0.0,
+        "c_std_scale": 3.0,
+        "k0": 0,
+        "theta_smooth": 0,
     }
     _required_params = {"max_iter", "max_delta_theta"}
-    _params: SPSA_Params
+    _params: ChainMap | SPSA_Params
 
+    def calibrate(self):
+        self._set_param_default("c0", self._approximate_c())
+        super().calibrate()
+        if self.verbose:
+            print("After calibration: ", self._params)
+
+    def _approximate_c(
+        self,
+        num_samples=10,
+    ):
+        losses = []
+        for i in range(num_samples):
+            if self.v_fnc is not None:
+                self._v = self.v_fnc()
+            losses.append(self._get_loss(self.theta_0))
+        # losses = [self._get_loss(self.theta_0) for i in range(num_samples)]
+        c_est = (
+            np.std(losses, ddof=1) * self["c_std_scale"] + 1e-10
+        )  # over-estimate it...
+        if "c_guess" not in self:
+            return c_est
+        # geometric mean of the guess and estimate
+        return np.sqrt(c_est * self["c_guess"])
+
+    @property
+    def ck(self):
+        return self.c_gain(self.k)
+
+    def c_gain(self, k):
+        return self._params["c0"] / (k + 1) ** self._params["gamma"]
+
+
+class OptimSPSA(OptimSA):
     def __init__(
         self,
         theta_0,
@@ -217,103 +368,39 @@ class OptimSPSA(OptimBase):
         verbose=False,
         **params,
     ):
-        params = ChainMap(params, self._default_params)
-        assert len(self._required_params - set(params)) == 0, self._required_params
         super().__init__(theta_0, loss_fnc, v_fnc, verbose=verbose, **params)
         if perturb_gen is None:
             self._perturb_gen = bernouli_sample(len(self.theta_0))
         else:
             self._perturb_gen = perturb_gen(len(self.theta_0))
-        self._c_guess = self._params.get("c0")
-
-    def calibrate(self):
-        self._params["c0"] = self._approximate_c(c_guess=self._c_guess)
-        super().calibrate()
-        if self.verbose:
-            print("After calibration: ", self._params)
-
-    def _approximate_c(self, num_samples=10, c_guess=None):
-        losses = [self._get_loss(self.theta_0) for i in range(num_samples)]
-        c_est = np.std(losses, ddof=1) * 3 + 1e-10  # over-estimate it...
-        if c_guess is None:
-            return c_est
-        # geometric mean of the guess and estimate
-        return np.sqrt(c_est * c_guess)
-
-    def _get_perturb(self):
-        return next(self._perturb_gen)
 
     def approx_grad(self):
-        c = self.ck(self.k)
-        perturb = self._get_perturb()
+        c = self.ck
+        perturb = next(self._perturb_gen) * self._implicit_theta_mask
         left = self.theta + c * perturb
         right = self.theta - c * perturb
-        v = None
         if self.v_fnc is not None:
-            v = self.v_fnc()
-        diff = self._get_loss(left, v=v) - self._get_loss(right, v=v)
+            self._v = self.v_fnc()
+        diff = self._get_loss(left) - self._get_loss(right)
+        grad = np.zeros(self.theta_0.shape)
 
-        grad = (diff / (2 * c)) / perturb
+        grad[self._implicit_theta_mask] = (diff / (2 * c)) / perturb[
+            self._implicit_theta_mask
+        ]
+        # grad = (diff / (2 * c)) / perturb
         self._grad_history.append(grad)
         return grad
 
-    def ck(self, k):
-        return self._params["c0"] / (k + 1) ** self._params["gamma"]
 
-
-class OptimFDSA(OptimBase):
-    _default_params: SPSA_Params = {
-        "gamma": 0.101,
-        "alpha": 0.602,
-        "t0": 0.5,
-        "num_approx": 1,
-        "blocking": False,
-        "max_iter": 100,
-        "momentum": 0.0,
-    }
-    _required_params = {"max_iter", "max_delta_theta"}
-    _params: SPSA_Params
-
-    def __init__(
-        self,
-        theta_0,
-        loss_fnc,
-        v_fnc=None,
-        perturb_gen=None,
-        verbose=False,
-        **params,
-    ):
-        params = ChainMap(params, self._default_params)
-        assert len(self._required_params - set(params)) == 0, self._required_params
-        super().__init__(theta_0, loss_fnc, v_fnc, verbose=verbose, **params)
-        if perturb_gen is None:
-            self._perturb_gen = bernouli_sample(len(self.theta_0))
-        else:
-            self._perturb_gen = perturb_gen(len(self.theta_0))
-        self._c_guess = self._params.get("c0")
-
-    def calibrate(self):
-        self._params["c0"] = self._approximate_c(c_guess=self._c_guess)
-        super().calibrate()
-        if self.verbose:
-            print("After calibration: ", self._params)
-
-    def _approximate_c(self, num_samples=10, c_guess=None):
-        losses = [self._get_loss(self.theta_0) for i in range(num_samples)]
-        c_est = np.std(losses, ddof=1) * 3 + 1e-10  # over-estimate it...
-        if c_guess is None:
-            return c_est
-        # geometric mean of the guess and estimate
-        return np.sqrt(c_est * c_guess)
-
-    def ck(self, k):
-        return self._params["c0"] / (k + 1) ** self._params["gamma"]
-
+class OptimFDSA(OptimSA):
     def approx_grad(self):
         # SPSA
         c = self.ck(self.k)
         P = len(self.theta)
         perturbs = np.eye(P) * c
+        perturbs[:, self._implicit_theta_mask == 0] = 0  # I could be wrong dim here...
+        if self.v_fnc is not None:
+            self._v = self.v_fnc()
         left_thetas = self.theta + perturbs
         right_thetas = self.theta - perturbs
         left_loss = np.apply_along_axis(self._get_loss, arr=left_thetas, axis=1)
@@ -337,15 +424,24 @@ if __name__ == "__main__":
         diff = np.asarray(theta) - goal_theta + v
         return np.sqrt(diff @ diff)
 
-    theta_0 = np.array([-1.5, -1.5])
+    theta_0 = np.array([0.4, 1.7])
+
+    def on_theta_update(optim: OptimSA):
+        optim.thetas[-1][-1] = optim.perc_k * goal_theta[-1] + theta_0[-1] * (
+            1 - optim.perc_k
+        )
 
     optim = OptimSPSA(
         theta_0,
-        partial(noisy_loss, noise_scale=1e-2),
+        partial(noisy_loss, noise_scale=1e-1),
         verbose=True,
-        max_delta_theta=0.15,
+        max_delta_theta=0.1,
+        implicit_theta_mask=[1, 0],
         # alpha=1,
         max_iter=100,
+        theta_smooth=10,
+        c_std_scale=0.1,
+        on_theta_update=on_theta_update,
         # momentum=0.95,
     )
     optim.run()

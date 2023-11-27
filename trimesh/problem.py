@@ -1,4 +1,5 @@
 from functools import partial
+import os
 from collections import ChainMap
 from typing import TypedDict
 
@@ -7,7 +8,10 @@ import matplotlib.pyplot as plt
 import trimesh
 from trimesh import Scene
 
-mesh = trimesh.load("../models/bunny.ply")
+model_path = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "../models/bunny.ply"
+)
+mesh = trimesh.load(model_path)
 
 # Normalize the mesh using trimesh functionality
 mesh.apply_translation(-mesh.centroid)
@@ -97,6 +101,11 @@ def stochastic_jacaard_index(m1: np.ndarray, m2: np.ndarray):
     if count_pos == 0:
         return 0
     return count_agree_pos / count_pos
+
+
+def v_generator(perc=0.5):
+    res = RESOLUTION[0] * RESOLUTION[1]
+    return np.random.choice(res, int(res * perc), False)
 
 
 if __name__ == "__main__":
