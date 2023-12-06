@@ -10,7 +10,7 @@ import pandas as pd
 import trimesh
 
 sns.set_style("darkgrid")
-from spsa import OptimSPSA, OptimFDSA, balanced_bernouli, segmented_uniform_sample
+from spsa import OptimSPSA, OptimFDSA, Box, balanced_bernouli, segmented_uniform_sample
 from problem import (
     mesh,
     get_transformed_scene,
@@ -71,6 +71,8 @@ def v_generator(perc=0.5):
 theta_0 = np.append(rotation, translation)
 goal_theta = np.append(true_rotation, true_translation)
 
+box = Box([0, 0, 0, -5, -5, 0], [2 * np.pi, 2 * np.pi, 2 * np.pi, 5, 5, 10])
+
 
 def setup_a_vs_c(optim: OptimSPSA, i):
     pass
@@ -91,10 +93,12 @@ def to_df(arr, name="Value"):
 def experiment_4p2(num_reps=100):
     optim = OptimSPSA(
         np.array(theta_0),
+        box,
         partial(get_loss_from_theta, perc=0.5),
         max_iter=80,
         max_delta_theta=0.1,
-        c_std_scale=8,
+        loss_rng=20,
+        c_std_scale=1,
     )
     metric_dfs = []
     percs = np.array([0.05, 0.1, 0.25, 0.5, 0.8, 1.0])
@@ -119,27 +123,37 @@ def experiment_4p2(num_reps=100):
 df = experiment_4p2(2)
 # %%
 fig, ax = plt.subplots(figsize=(8, 8))
-sns.lineplot(df, x="Run", y="Distance", hue="Percent", ax=ax, n_boot=500)
+sns.lineplot(df, x="Run", y="Loss", hue="Percent", ax=ax, n_boot=500)
 ax.set_ylabel(r"$|\hat{\theta}-\theta^*|$")
 sns.move_legend(ax, "center right")
 # %%
 
 optim = OptimSPSA(
     np.array(theta_0),
+    box,
     partial(get_loss_from_theta, perc=0.5),
-    max_iter=10000,
-    num_approx=1,
-    max_delta_theta=0.15,
-    c_std_scale=3,
-    theta_smooth=10
+    max_iter=500,
+    loss_rng=20,
+    # max_delta_theta=2.5 / 500,
+    # c_std_scale=2,
     # alpha=0.8,
 )
-losses, dists, thetas = optim.custom_experiment(
-    1, setup_a_vs_c, get_metrics=get_metrics
-)
+optim.run()
+
+
+dist = optim.rms_dist_from_truth(goal_theta)
+dist /= dist[0]
+plt.plot(dist)
+plt.show()
+# %%
+plt.plot(optim.thetas - box.normalize(goal_theta))
+plt.show()
 
 
 # %%
+losses, dists, thetas = optim.custom_experiment(
+    1, setup_a_vs_c, get_metrics=get_metrics
+)
 dfs = []
 lbls = ["yaw", "pitch", "roll", "x", "y", "z"]
 for i, theta_i in enumerate(thetas):

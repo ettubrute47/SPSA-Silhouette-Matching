@@ -10,7 +10,7 @@ import pandas as pd
 import trimesh
 
 sns.set_style("darkgrid")
-from spsa import OptimSPSA, OptimFDSA, balanced_bernouli, segmented_uniform_sample
+from spsa import OptimSPSA, Box, OptimFDSA, balanced_bernouli, segmented_uniform_sample
 from problem import (
     mesh,
     get_transformed_scene,
@@ -31,7 +31,8 @@ scene = get_transformed_scene(
 )
 true_sil = raytrace_silhouette(scene, perc=1)
 
-rotation = true_rotation + np.array([0.3, 1.5, 0.2])
+# rotation = true_rotation + np.array([0.3, 1.5, 0.2])
+rotation = true_rotation + np.array([0.6, 0.1, 0.2])
 translation = true_translation + np.array([-0.5, -0.5, -4])
 # translation = true_translation + np.array([-0.5, -0.5, -0.5])
 
@@ -68,6 +69,7 @@ def get_loss_from_theta(theta: np.ndarray, perc=0.5, v=None):
 
 theta_0 = np.append(rotation, translation)
 goal_theta = np.append(true_rotation, true_translation)
+box = Box([0, 0, 0, -5, -5, 0], [2 * np.pi, 2 * np.pi, 2 * np.pi, 5, 5, 10])
 
 
 def setup_a_vs_c(optim: OptimSPSA, i):
@@ -92,10 +94,12 @@ implicit_translation = TranslationEstimator(true_sil)
 def experiment_4p2(num_reps=100):
     optim = OptimSPSA(
         np.array(theta_0),
+        box,
         partial(get_loss_from_theta, perc=0.5),
         max_iter=50,
-        max_delta_theta=0.1,
-        c_std_scale=3,
+        loss_rng=20,
+        # max_delta_theta=0.1,
+        c_std_scale=5,
         on_theta_update=implicit_translation.on_theta_update,
         implicit_theta_mask=[1, 1, 1, 0, 0, 0],
     )
@@ -109,12 +113,13 @@ def experiment_4p2(num_reps=100):
         losses, dists, thetas = optim.custom_experiment(
             num_reps, setup_a_vs_c, get_metrics=get_metrics
         )
+        dist0 = np.linalg.norm(box.normalize(theta_0) - box.normalize(goal_theta))
         print(optim._params)
         dist_df = to_df(dists[1:])
         loss_df = to_df(losses, "Loss")
         loss_df["Percent"] = perc
         loss_df["Experiment"] = i
-        loss_df["Distance"] = dist_df["Value"]
+        loss_df["Distance"] = dist_df["Value"] / dist0
         metric_dfs.append(loss_df)
 
     return pd.concat(metric_dfs, ignore_index=True)
@@ -122,36 +127,40 @@ def experiment_4p2(num_reps=100):
 
 df = experiment_4p2(20)
 # %%
+dist0 = np.linalg.norm(box.normalize(theta_0) - box.normalize(goal_theta))
+df2 = df.copy()
+df2["Distance"] /= dist0
 fig, ax = plt.subplots(figsize=(8, 8))
-sns.lineplot(df, x="Run", y="Distance", hue="Percent", ax=ax, n_boot=500)
+sns.lineplot(df2, x="Run", y="Distance", hue="Percent", ax=ax, n_boot=500)
 ax.set_ylabel(r"$|\hat{\theta}-\theta^*|$")
 sns.move_legend(ax, "center right")
 plt.show()
-# %%
-sns.histplot(df[df.Run == 49], x="Loss", hue="Percent")
+sns.histplot(df2[df2.Run == 49], x="Distance", hue="Percent")
 # %%
 
 optim = OptimSPSA(
     np.array(theta_0),
+    box,
     partial(get_loss_from_theta, perc=0.5),
-    max_iter=100,
+    max_iter=50,
     num_approx=1,
-    max_delta_theta=0.15,
-    c_std_scale=1,
-    theta_smooth=10,
+    loss_rng=20,
+    # max_delta_theta_scale=0.1,
+    c_std_scale=5,
+    # theta_smooth=10,
     on_theta_update=implicit_translation.on_theta_update,
     implicit_theta_mask=[1, 1, 1, 0, 0, 0],
     # alpha=0.8,
 )
-theta = optim.run()
+theta = box.unnormalize(optim.run())
 
 scene = get_scene_from_theta(theta)
 sil = raytrace_silhouette(scene, 1.0)
 
-plt.imshow(sil + true_sil)
-
-# %%
-
+plt.imshow(sil)
+plt.show()
+plt.plot(optim.thetas - box.normalize(goal_theta))
+plt.show()
 
 # %%
 losses, dists, thetas = optim.custom_experiment(

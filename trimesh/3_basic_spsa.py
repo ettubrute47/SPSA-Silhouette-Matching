@@ -76,8 +76,8 @@ optim = OptimSPSA(
     box,
     partial(noisy_loss, noise_scale=1e-1),
     max_iter=200,
+    loss_rng=6,
     max_delta_theta=0.01,
-    theta_smooth=5,
 )
 optim.run()
 diffs = optim.rms_dist_from_truth(goal_theta)
@@ -89,7 +89,7 @@ plt.plot(diffs)
 def plot_trail(optim: OptimSPSA, ax=None):
     if ax is None:
         ax = plt.gca()
-    thetas = optim.thetas
+    thetas = box.unnormalize(optim.thetas)
     cmap = plt.cm.coolwarm
     num_segments = len(thetas)
     for i in range(len(thetas) - 1):
@@ -105,8 +105,10 @@ plot_trail(optim)
 fig, axs = plt.subplots(1, 3, figsize=(10, 4))
 optim = OptimSPSA(
     theta_0,
+    box,
     partial(noisy_loss, noise_scale=1e-2),
     max_iter=1000,
+    loss_rng=6,
     max_delta_theta=0.05,
     k0=800,
 )
@@ -118,11 +120,26 @@ print(optim._params)
 optim.run(c0=1e-2, a0=0.1)
 print(optim._params)
 plot_trail(optim, axs[0])
-optim.run(a0=0.1, c0=1)
+optim.run(a0=0.1, c0=0.1)
 plot_trail(optim, axs[1])
 optim.run(c0=1e-2, a0=0.001)
 print(optim._params)
 plot_trail(optim, axs[2])
+
+# %%
+optim = OptimSPSA(
+    theta_0,
+    box,
+    partial(noisy_loss, noise_scale=1e-2),
+    max_iter=1000,
+    loss_rng=6,
+    # max_delta_theta=0.05,
+)
+
+optim.run()
+
+plt.plot(optim.rms_dist_from_truth(goal_theta))
+
 
 # %%
 
@@ -153,10 +170,12 @@ def to_df(arr, name="Value"):
 def experiment_3p1(num_reps=100):
     optim = OptimSPSA(
         np.array(goal_theta),
+        box,
         partial(noisy_loss, noise_scale=1e-2),
+        loss_rng=20,
         max_iter=1000,
         k0=900,
-        max_delta_theta=0.1,
+        # max_delta_theta=0.1,
     )
     metric_dfs = []
     params = [
@@ -179,7 +198,7 @@ def experiment_3p1(num_reps=100):
     return pd.concat(metric_dfs, ignore_index=True)
 
 
-df = experiment_3p1(200)
+df = experiment_3p1(2)
 # %%
 fig, ax = plt.subplots(figsize=(8, 8))
 sns.lineplot(df, x="Run", y="Distance", hue="Params", ax=ax, n_boot=500)

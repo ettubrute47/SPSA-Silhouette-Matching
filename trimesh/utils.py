@@ -80,11 +80,24 @@ class TranslationEstimator:
 
             corrected = corrected - np.array([dx, dy, 0]) * 1.1
             corrected[-1] = Z
+
+        scene = get_transformed_scene(
+            mesh, trimesh.transformations.euler_matrix(*rotation), corrected
+        )
+        sil = raytrace_silhouette(scene, perc=1)
+        bb = bounding_box(sil == 2)
+
+        dxy2 = get_xy_shift(bb, self.bb_true)
+        # assert np.all(np.abs(dxy2) < np.abs(dxy))
         return corrected
 
     def on_theta_update(self, optim):
-        rotation = optim.thetas[-1][:3]
-        translation = optim.thetas[-1][3:]
-        z_gain = optim.a_gain(optim.k - optim._params["A"]) * 1.5
+        theta = optim.box.unnormalize(optim.theta)
+        rotation = theta[:3]
+        translation = theta[3:]
+        z_gain = optim.a_gain(optim.k - optim._params["A"]) / optim.a_gain(
+            0 - optim._params["A"]
+        )
         corrected = self.correct_translation(rotation, translation, z_gain=z_gain)
-        optim.thetas[-1][3:] = corrected
+        theta[3:] = corrected
+        optim.thetas[-1] = optim.box.normalize(theta)

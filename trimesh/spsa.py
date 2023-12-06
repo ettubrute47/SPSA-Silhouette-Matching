@@ -52,13 +52,15 @@ class SPSA_Params(TypedDict):
     c_guess: float
     c_std_scale: float
     k0: int
+    loss_rng: float
 
 
 class Box:
     def __init__(self, low: np.ndarray, hi: np.ndarray, size=None):
-        self.low = low
-        self.hi = hi
-        self.rng = hi - low
+        self.low = np.asarray(low)
+        self.hi = np.asarray(hi)
+        self.rng = self.hi - self.low
+        self.mag = np.linalg.norm(self.rng)
 
     def normalize(self, theta: np.ndarray, i=...):
         return (self.clip(theta, i=i) - self.low[i]) / self.rng[i]
@@ -91,6 +93,9 @@ class OptimBase:
     ):
         self.verbose = verbose
         self._params = ChainMap(params, self._default_params)
+        self._params.maps[-1]["max_delta_theta"] = (
+            1 / self._params["max_iter"]
+        )  # default value for max_delta_theta...
         self.loss = loss_fnc
         self._on_theta_update = on_theta_update
         self.v_fnc = v_fnc
@@ -134,6 +139,7 @@ class OptimBase:
         approx_grad = np.mean([self.approx_grad() for i in range(num_approx)], axis=0)
         # |a / (k + 1 + A) ** alpha * grad| = max_delta_theta
         max_grad = np.abs(approx_grad).max()
+        assert max_grad > 0, f"0 grad for {self.theta_0} normal theta0..."
         a0 = (
             (1 + self._params["A"]) ** self._params["alpha"]
             * max_delta_theta
@@ -154,7 +160,7 @@ class OptimBase:
         return key in self._params.maps[0]
 
     def calibrate(self):
-        self._set_param_default("A", self["max_iter"] * 0.13)
+        self._set_param_default("A", self["max_iter"] * 0.07)
         # approximate grad, and take magnitude...
         self._set_param_default("a0", self._approximate_a(self["max_delta_theta"]))
 
@@ -223,14 +229,34 @@ class OptimBase:
     def temp(self, k):
         return self._params["t0"] / (k + 1) ** self._params["gamma"]
 
-    @property
-    def theta(self):
+    def smooth_theta(self):
+        """
+        V1: just static exponential smooth
+        """
         if self["theta_smooth"] > 1 and len(self.thetas) > self["theta_smooth"]:
             return np.average(
                 self.thetas[-self["theta_smooth"] :][::-1],
                 axis=0,
                 weights=(1 / np.arange(1, self["theta_smooth"] + 1)),
             )
+        return self.thetas[-1]
+
+    def smooth_theta2(self):
+        n = int(self["theta_smooth"] * self.k)  # percent of k
+        # also the weights are exponential changing...
+        n = int(n * self.perc_k)
+        if n <= 1:
+            return self.thetas[-1]
+        return np.average(
+            self.thetas[-n:][::-1],
+            axis=0,
+            weights=(1 / np.arange(1, n + 1)),
+        )
+
+    @property
+    def theta(self):
+        if self["theta_smooth"] > 0:
+            return self.smooth_theta2()
         return self.thetas[-1]
 
     @property
@@ -253,7 +279,6 @@ class OptimBase:
         pi = int(num_steps // 10)
         for i in range(num_steps):
             theta = self.step()
-            print(theta)
             if self.verbose and i % pi == 0:
                 self._print_progress()
             yield theta
@@ -330,7 +355,7 @@ class OptimSA(OptimBase):
         "k0": 0,
         "theta_smooth": 0,
     }
-    _required_params = {"max_iter", "max_delta_theta"}
+    _required_params = {"max_iter", "max_delta_theta", "loss_rng"}
     _params: ChainMap | SPSA_Params
 
     def calibrate(self):
@@ -350,7 +375,7 @@ class OptimSA(OptimBase):
             losses.append(self._get_loss(self.theta_0))
         # losses = [self._get_loss(self.theta_0) for i in range(num_samples)]
         c_est = (
-            np.std(losses, ddof=1) * self["c_std_scale"] + 1e-10
+            np.std(losses, ddof=1) * self["c_std_scale"] / self["loss_rng"] + 1e-10
         )  # over-estimate it...
         if "c_guess" not in self:
             return c_est
@@ -444,11 +469,11 @@ if __name__ == "__main__":
         Box(np.zeros(2), np.ones(2) * 10),
         partial(noisy_loss, noise_scale=1e-1),
         verbose=True,
-        max_delta_theta=0.1,
+        loss_rng=10,
         implicit_theta_mask=[1, 0],
         # alpha=1,
         max_iter=100,
-        theta_smooth=10,
+        # theta_smooth=0.1,
         c_std_scale=1,
         on_theta_update=on_theta_update,
         # momentum=0.95,
