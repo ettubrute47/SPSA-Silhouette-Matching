@@ -73,6 +73,23 @@ class Box:
             return np.clip(theta, 0, 1)
         return np.clip(theta, self.low[i], self.hi[i])
 
+    def sample(self):
+        return np.random.rand(len(self.low)) * self.rng + self.low
+
+    def perturb(self, theta, mag=0.5, normalized=False):
+        """
+        Generates a random perturbation where each element can be randomized uniformly...
+
+        if normalized then theta is normalized, otherwise it isn't.
+        """
+        if normalized:
+            return self.clip(
+                theta + (np.random.rand(len(self.low)) * mag - mag / 2),
+                normalized=True,
+            )
+        diff = np.random.rand(len(self.low)) * self.rng * mag - self.rng * mag / 2
+        return self.clip(theta + diff)
+
 
 # a = a0 * (1 + A) ** alpha
 # return a / (k + 1 + A) ** alpha
@@ -127,11 +144,11 @@ class OptimBase:
         if theta_0 is not None:
             self._theta_0 = np.array(theta_0)
         self._all_loss_history = []
-        self._loss_history = []
         self._used_thetas = []
         self._block_history = []
         self._grad_history = []
         self.thetas = [self.theta_0]
+        self._loss_history = [self._get_loss(self.theta_0)]
         # self.thetas = [np.array(theta_0)]
         self.k = self["k0"]
 
@@ -275,7 +292,7 @@ class OptimBase:
         if calibrate:
             self.calibrate()
         if num_steps is None:
-            num_steps = self._params["max_iter"]
+            num_steps = self._params["max_iter"] - self.k
         pi = int(num_steps // 10)
         for i in range(num_steps):
             theta = self.step()
@@ -457,17 +474,18 @@ if __name__ == "__main__":
         diff = np.asarray(theta) - goal_theta + v
         return np.sqrt(diff @ diff)
 
-    theta_0 = np.array([0.4, 1.7])
-
     def on_theta_update(optim: OptimSA):
         optim.thetas[-1][-1] = optim.box.normalize(
             optim.perc_k * goal_theta[-1] + theta_0[-1] * (1 - optim.perc_k), i=-1
         )
 
+    theta_0 = np.array([0.4, 1.7])
+
     optim = OptimSPSA(
         theta_0,
         Box(np.zeros(2), np.ones(2) * 10),
-        partial(noisy_loss, noise_scale=1e-1),
+        loss_fnc=partial(noisy_loss, noise_scale=1e-1),
+        noise_scale=1e-1,
         verbose=True,
         loss_rng=10,
         implicit_theta_mask=[1, 0],
@@ -478,6 +496,7 @@ if __name__ == "__main__":
         on_theta_update=on_theta_update,
         # momentum=0.95,
     )
+
     optim.run()
 
     thetas = optim.box.unnormalize(optim.thetas)

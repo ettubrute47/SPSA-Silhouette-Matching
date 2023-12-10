@@ -1,12 +1,6 @@
 import numpy as np
 import trimesh
 
-from problem import (
-    mesh,
-    get_transformed_scene,
-    raytrace_silhouette,
-)
-
 
 def bounding_box(mask):
     # Get the x and y coordinates of non-zero values in the mask
@@ -50,54 +44,29 @@ def shift_bb_xy(bb, dxy):
     return np.append(bb[:2] + dxy[0], bb[2:] + dxy[1]).astype(int)
 
 
-class TranslationEstimator:
-    def __init__(self, true_sil: np.ndarray):
-        self.bb_true = bounding_box(true_sil == 2)
-        self.true_scale = get_scale(self.bb_true)
-
-    def correct_translation(self, rotation, translation, num_steps=1, z_gain=1):
-        corrected = np.array(translation)
-        for i in range(num_steps):
-            scene = get_transformed_scene(
-                mesh, trimesh.transformations.euler_matrix(*rotation), corrected
-            )
-            sil = raytrace_silhouette(scene, perc=1)
-            bb = bounding_box(sil == 2)
-
-            dxy = get_xy_shift(bb, self.bb_true)
-            c = 0.1
-            z_diff = corrected[-1] - corrected[-1] * (
-                get_scale(bb) / get_scale(self.bb_true)
-            )
-            Z = corrected[-1] - z_diff * z_gain
-            Z = corrected[-1] * (
-                z_gain * get_scale(bb) / self.true_scale + max(0, (1 - z_gain))
-            )
-
-            # I want to first shift the z to the appropriate place, and the x, y given my estimated z.
-            dx = dxy[0] * Z / scene.camera.K[0, 0]
-            dy = dxy[1] * Z / scene.camera.K[1, 1]
-
-            corrected = corrected - np.array([dx, dy, 0]) * 1.1
-            corrected[-1] = Z
-
-        scene = get_transformed_scene(
-            mesh, trimesh.transformations.euler_matrix(*rotation), corrected
-        )
-        sil = raytrace_silhouette(scene, perc=1)
-        bb = bounding_box(sil == 2)
-
-        dxy2 = get_xy_shift(bb, self.bb_true)
-        # assert np.all(np.abs(dxy2) < np.abs(dxy))
-        return corrected
-
-    def on_theta_update(self, optim):
-        theta = optim.box.unnormalize(optim.theta)
-        rotation = theta[:3]
-        translation = theta[3:]
-        z_gain = optim.a_gain(optim.k - optim._params["A"]) / optim.a_gain(
-            0 - optim._params["A"]
-        )
-        corrected = self.correct_translation(rotation, translation, z_gain=z_gain)
-        theta[3:] = corrected
-        optim.thetas[-1] = optim.box.normalize(theta)
+def shift_mask(mask, dxy, fval=0.0):
+    if not np.any(dxy.astype(int)):
+        return np.array(mask)
+    shifted = np.ones(mask.shape) * fval
+    dx = int(-dxy[1])
+    dy = int(-dxy[0])
+    if dx < 0 and dy < 0:
+        shifted[:dy, :dx] = mask[-dy:, -dx:]
+    elif dx < 0 and dy >= 0:
+        if dy == 0:
+            shifted[:, :dx] = mask[:, -dx:]
+        else:
+            shifted[dy:, :dx] = mask[:-dy, -dx:]
+    elif dx >= 0 and dy < 0:
+        if dx == 0:
+            shifted[:dy, :] = mask[-dy:, :]
+        else:
+            shifted[:dy, dx:] = mask[-dy:, :-dx]
+    else:
+        if dx == 0:
+            shifted[dy:, :] = mask[:-dy, :]
+        elif dy == 0:
+            shifted[:, dx:] = mask[:, :-dx]
+        else:
+            shifted[dy:, dx:] = mask[:-dy, :-dx]
+    return shifted
